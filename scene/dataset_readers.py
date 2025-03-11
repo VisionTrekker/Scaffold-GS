@@ -163,6 +163,7 @@ def readColmapSceneInfo(path, images, eval, lod, llffhold=8):
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     if eval:
+        # –lod 用于对 Train/Test 的图像进行划分，表示Test 的Image 的数量。 比如， lod=40, 那么表示 选择40张图像作为 Test，剩下的图像作为 Train，一般设置为0
         if lod>0:
             print(f'using lod, using eval')
             if lod < 50:

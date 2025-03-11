@@ -130,7 +130,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-        
+        # Mask 掉视锥体 frustum 之外的 Gaussian, 并且对于 alpha 的阈值具有一定的要求
         voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe,background)
         retain_grad = (iteration < opt.update_until and iteration >= 0)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad)
@@ -165,20 +165,24 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 scene.save(iteration)
             
             # densification
+            # 500 < iteration < 15000
             if iteration < opt.update_until and iteration > opt.start_stat:
                 # add statis
                 gaussians.training_statis(viewspace_point_tensor, opacity, visibility_filter, offset_selection_mask, voxel_visible_mask)
                 
                 # densification
+                # > 1500 且 每100代
                 if iteration > opt.update_from and iteration % opt.update_interval == 0:
                     gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
+
+            # 第15000代，删除...
             elif iteration == opt.update_until:
                 del gaussians.opacity_accum
                 del gaussians.offset_gradient_accum
                 del gaussians.offset_denom
                 torch.cuda.empty_cache()
                     
-            # Optimizer step
+            # < 30000代，优化，Optimizer step
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
@@ -491,16 +495,16 @@ if __name__ == "__main__":
         os.system("echo $CUDA_VISIBLE_DEVICES")
         logger.info(f'using GPU {args.gpu}')
 
-    
-
+    # 备份当前代码
     try:
         saveRuntimeCode(os.path.join(args.model_path, 'backup'))
     except:
         logger.info(f'save code failed~')
         
     dataset = args.source_path.split('/')[-1]
-    exp_name = args.model_path.split('/')[-2]
-    
+    exp_name = args.model_path.split('/')[-1]   # 原为-2，-m中去掉time后应该为-1
+
+    # 设置 WandB 追踪的相关参数,包括项目名称、运行名称、启动方式和配置信息
     if args.use_wandb:
         wandb.login()
         run = wandb.init(

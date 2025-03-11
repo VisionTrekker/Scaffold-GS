@@ -48,6 +48,8 @@ def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
     Rt = np.linalg.inv(C2W)
     return np.float32(Rt)
 
+# 根据相机的 Fov_x, Fov_y, z_near, z_far 构建相机透视投影矩阵
+# 假设一个对称的视锥，不直接考虑主点偏移, (cx,cy 位于图像的中心的地方)
 def getProjectionMatrix(znear, zfar, fovX, fovY):
     tanHalfFovY = math.tan((fovY / 2))
     tanHalfFovX = math.tan((fovX / 2))

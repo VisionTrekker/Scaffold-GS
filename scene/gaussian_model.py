@@ -45,15 +45,15 @@ class GaussianModel:
 
 
     def __init__(self, 
-                 feat_dim: int=32, 
-                 n_offsets: int=5, 
+                 feat_dim: int=32,
+                 n_offsets: int=5,              # 实际为10
                  voxel_size: float=0.01,
                  update_depth: int=3, 
-                 update_init_factor: int=100,
+                 update_init_factor: int=100,   # 实际为16
                  update_hierachy_factor: int=4,
-                 use_feat_bank : bool = False,
-                 appearance_dim : int = 32,
-                 ratio : int = 1,
+                 use_feat_bank : bool = False,  # 是否在基于视角方向和距离的多尺度上增强anchor特征
+                 appearance_dim : int = 32,     # 实际为0
+                 ratio : int = 1,               # 实际为1，下采样输入点云
                  add_opacity_dist : bool = False,
                  add_cov_dist : bool = False,
                  add_color_dist : bool = False,
@@ -95,6 +95,7 @@ class GaussianModel:
         self.spatial_lr_scale = 0
         self.setup_functions()
 
+        # 若增强anchor feature，则定义根据视角方向(3)和距离(1)估计多尺度特征的权重的MLP，生成3个权重: 4->32, 32->3
         if self.use_feat_bank:
             self.mlp_feature_bank = nn.Sequential(
                 nn.Linear(3+1, feat_dim),
@@ -103,7 +104,9 @@ class GaussianModel:
                 nn.Softmax(dim=1)
             ).cuda()
 
+        # 因self.add_opacity_dist为False，则实际预测不透明度只有anchor特征和方向
         self.opacity_dist_dim = 1 if self.add_opacity_dist else 0
+        # 定义不透明度的MLP：32+3(+1) -> 32, 32 -> 10
         self.mlp_opacity = nn.Sequential(
             nn.Linear(feat_dim+3+self.opacity_dist_dim, feat_dim),
             nn.ReLU(True),
@@ -111,15 +114,19 @@ class GaussianModel:
             nn.Tanh()
         ).cuda()
 
+        # 因self.add_cov_dist为False，则实际预测不透明度只有anchor特征和方向
         self.add_cov_dist = add_cov_dist
         self.cov_dist_dim = 1 if self.add_cov_dist else 0
+        # 定义尺度和旋转的MLP：32+3(+1) -> 32, 32 -> 7*10
         self.mlp_cov = nn.Sequential(
             nn.Linear(feat_dim+3+self.cov_dist_dim, feat_dim),
             nn.ReLU(True),
             nn.Linear(feat_dim, 7*self.n_offsets),
         ).cuda()
 
+        # 因self.color_dist_dim为False，则实际预测不透明度只有anchor特征和方向
         self.color_dist_dim = 1 if self.add_color_dist else 0
+        # 定义颜色的MLP：32+3(+1+0) -> 32, 32 -> 3*10
         self.mlp_color = nn.Sequential(
             nn.Linear(feat_dim+3+self.color_dist_dim+self.appearance_dim, feat_dim),
             nn.ReLU(True),
@@ -247,29 +254,31 @@ class GaussianModel:
 
         print(f'Initial voxel_size: {self.voxel_size}')
         
-        
+        # 划分voxel，并删除redundancy 点云
         points = self.voxelize_sample(points, voxel_size=self.voxel_size)
-        fused_point_cloud = torch.tensor(np.asarray(points)).float().cuda()
-        offsets = torch.zeros((fused_point_cloud.shape[0], self.n_offsets, 3)).float().cuda()
-        anchors_feat = torch.zeros((fused_point_cloud.shape[0], self.feat_dim)).float().cuda()
+        fused_point_cloud = torch.tensor(np.asarray(points)).float().cuda() # N 3
+        offsets = torch.zeros((fused_point_cloud.shape[0], self.n_offsets, 3)).float().cuda()   # N 10 3
+        anchors_feat = torch.zeros((fused_point_cloud.shape[0], self.feat_dim)).float().cuda()  # N 32
         
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
+        # 尺度，使用knn搜索，找到每个点云的k个最近邻点
+        # 每一个 anchor_point 额外有一个 scaling 的属性， 其初始化时每个3D点到最近3D点的距离， 但是却 repeat 了6次
         dist2 = torch.clamp_min(distCUDA2(fused_point_cloud).float().cuda(), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 6)
-        
+        # 旋转 N 4：从0开始初始化
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
-
+        # 不透明度 N 1：初始化为0,1
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
-
-        self._anchor = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        # 初始化相关属性
+        self._anchor = nn.Parameter(fused_point_cloud.requires_grad_(True)) # 用初始点云初始化为anchor的中心点
         self._offset = nn.Parameter(offsets.requires_grad_(True))
         self._anchor_feat = nn.Parameter(anchors_feat.requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(False))
         self._opacity = nn.Parameter(opacities.requires_grad_(False))
-        self.max_radii2D = torch.zeros((self.get_anchor.shape[0]), device="cuda")
+        self.max_radii2D = torch.zeros((self.get_anchor.shape[0]), device="cuda")   # N
 
 
     def training_setup(self, training_args):
@@ -285,13 +294,14 @@ class GaussianModel:
         
         if self.use_feat_bank:
             l = [
+                # 可学习的高斯的属性
                 {'params': [self._anchor], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "anchor"},
                 {'params': [self._offset], 'lr': training_args.offset_lr_init * self.spatial_lr_scale, "name": "offset"},
                 {'params': [self._anchor_feat], 'lr': training_args.feature_lr, "name": "anchor_feat"},
                 {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
                 {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
                 {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
-                
+                # 可学习的网络的参数
                 {'params': self.mlp_opacity.parameters(), 'lr': training_args.mlp_opacity_lr_init, "name": "mlp_opacity"},
                 {'params': self.mlp_feature_bank.parameters(), 'lr': training_args.mlp_featurebank_lr_init, "name": "mlp_featurebank"},
                 {'params': self.mlp_cov.parameters(), 'lr': training_args.mlp_cov_lr_init, "name": "mlp_cov"},
@@ -325,8 +335,9 @@ class GaussianModel:
                 {'params': self.mlp_cov.parameters(), 'lr': training_args.mlp_cov_lr_init, "name": "mlp_cov"},
                 {'params': self.mlp_color.parameters(), 'lr': training_args.mlp_color_lr_init, "name": "mlp_color"},
             ]
-
+        # 为学习的高斯属性和网络参数设置 优化器
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        # 设置 学习率调度器
         self.anchor_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,

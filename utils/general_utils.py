@@ -42,8 +42,14 @@ def get_expon_lr_func(
     :param conf: config subtree 'lr' or similar
     :param max_steps: int, the number of steps during optimization.
     :return HoF which takes step as input
+        lr_init：    学习率初始值
+        lr_final：   学习率最后的值
+        lr_delay_steps： Warmup 的 step 数
+        lr_delay_mult：  Warmup 的起始缩放因子
+        max_steps：  最大的步骤
     """
 
+    # delay_rate 只是在 warmup 阶段起作用。是学习率的缩放系数。
     def helper(step):
         if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
             # Disable this parameter
